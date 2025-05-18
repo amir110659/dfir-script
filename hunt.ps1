@@ -1,3 +1,326 @@
+function PCA {
+
+
+param(
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("HTML", "CSV", "JSON", "ALL")]
+    [string]$ExportFormat = "ALL"
+)
+
+$PcaLogPath = "C:\Windows\appcompat\pca"
+
+$PcaAppLaunchDic = Join-Path -Path $PcaLogPath -ChildPath "PcaAppLaunchDic.txt"
+$PcaGeneralDb0 = Join-Path -Path $PcaLogPath -ChildPath "PcaGeneralDb0.txt"
+
+Write-Host "`nPCA Data Analysis Tool" -ForegroundColor Green
+Write-Host "------------------------`n" -ForegroundColor DarkGray
+
+function Parse-PcaAppLaunchDic {
+    if (Test-Path $PcaAppLaunchDic) {
+        Get-Content $PcaAppLaunchDic | ForEach-Object {
+            $parts = $_ -split "\|"
+            if ($parts.Length -eq 2) {
+                [PSCustomObject]@{
+                    ExecutablePath    = $parts[0]
+                    LastExecutionTime = [datetime]$parts[1]
+                }
+            }
+        }
+    } else {
+        Write-Warning "$PcaAppLaunchDic not found."
+    }
+}
+
+# Function to parse PcaGeneralDb0.txt (Abnormal Process Exits & Compatibility Logs)
+function Parse-PcaGeneralDb0 {
+    if (Test-Path $PcaGeneralDb0) {
+        Get-Content $PcaGeneralDb0 -Encoding Unicode | ForEach-Object {
+            $parts = $_ -split "\|"
+            if ($parts.Length -ge 7) {
+                [PSCustomObject]@{
+                    Timestamp      = [datetime]$parts[0]
+                    RecordType     = $parts[1]
+                    ExecutablePath = $parts[2]
+                    ProductName    = $parts[3]
+                    CompanyName    = $parts[4]
+                    ProductVersion = $parts[5]
+                    ProgramID      = $parts[6]
+                    Message        = $parts[7]
+                }
+            }
+        }
+    } else {
+        Write-Warning "$PcaGeneralDb0 not found."
+    }
+}
+
+function Export-ResultsToFormats {
+    param(
+        [array]$AppLaunchData,
+        [array]$GeneralDbData,
+        [string]$ExportFormat,
+        [string]$BasePath
+    )
+    
+    $Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $ExportBaseName = "$BasePath`_$Timestamp"
+    $AllData = $AppLaunchData + $GeneralDbData
+    $HtmlPath = "$ExportBaseName.html"
+    
+    if ($AllData) {
+        if ($ExportFormat -eq "CSV" -or $ExportFormat -eq "ALL") {
+            $CSVPath = "$ExportBaseName.csv"
+            $AllData | Export-Csv -Path $CSVPath -NoTypeInformation
+            Write-Host "`nData exported to CSV: $CSVPath" -ForegroundColor Green
+        }
+        
+        if ($ExportFormat -eq "JSON" -or $ExportFormat -eq "ALL") {
+            $JSONPath = "$ExportBaseName.json"
+            $AllData | ConvertTo-Json -Depth 4 | Out-File $JSONPath
+            Write-Host "Data exported to JSON: $JSONPath" -ForegroundColor Green
+        }
+        
+        Create-HtmlReport -AppLaunchData $AppLaunchData -GeneralDbData $GeneralDbData -HtmlPath $HtmlPath
+        Write-Host "HTML report generated: $HtmlPath" -ForegroundColor Green
+        
+        return $HtmlPath
+    } else {
+        Write-Host "No data to export." -ForegroundColor Yellow
+        return $null
+    }
+}
+
+function Create-HtmlReport {
+    param(
+        [array]$AppLaunchData,
+        [array]$GeneralDbData,
+        [string]$HtmlPath
+    )
+    
+    $Css = @"
+    <style>
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        h1, h2, h3 {
+            color: #0078D7;
+        }
+        h1 {
+            text-align: center;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #0078D7;
+            margin-bottom: 30px;
+        }
+        .section {
+            margin-bottom: 30px;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-radius: 5px;
+            border-left: 5px solid #0078D7;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+        th {
+            background-color: #0078D7;
+            color: white;
+            padding: 12px;
+            text-align: left;
+        }
+        td {
+            padding: 10px;
+            border-bottom: 1px solid #ddd;
+        }
+        tr:nth-child(even) {
+            background-color: #f2f2f2;
+        }
+        tr:hover {
+            background-color: #e6f3ff;
+        }
+        .summary {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            margin-bottom: 20px;
+        }
+        .stat-box {
+            flex: 1;
+            min-width: 200px;
+            margin: 10px;
+            padding: 15px;
+            background-color: #e6f3ff;
+            border-radius: 5px;
+            text-align: center;
+            box-shadow: 0 0 5px rgba(0,0,0,0.05);
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #0078D7;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            font-size: 12px;
+            color: #777;
+        }
+        .path-column {
+            max-width: 500px;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+    </style>
+"@
+
+    $ChartJs = @"
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+"@
+
+    $HtmlContent = @"
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>PCA Analysis Report - $(Get-Date -Format 'yyyyMMdd_HHmmss')</title>
+        $Css
+        $ChartJs
+    </head>
+    <body>
+        <div class="container">
+            <h1>Program Compatibility Assistant (PCA) Analysis Report</h1>
+            <p>Report generated on $(Get-Date -Format 'dddd, MMMM dd, yyyy HH:mm:ss')</p>
+            
+            <div class="summary">
+"@
+
+    if ($AppLaunchData) {
+        $AppCount = ($AppLaunchData | Measure-Object).Count
+        $RecentExecution = ($AppLaunchData | Sort-Object LastExecutionTime -Descending | Select-Object -First 1).LastExecutionTime
+        
+        $HtmlContent += @"
+                <div class="stat-box">
+                    <div>Total Applications</div>
+                    <div class="stat-value">$AppCount</div>
+                </div>
+                <div class="stat-box">
+                    <div>Most Recent Execution</div>
+                    <div class="stat-value">$($RecentExecution.ToString("MM/dd/yyyy"))</div>
+                </div>
+"@
+    }
+
+    if ($GeneralDbData) {
+        $EventCount = ($GeneralDbData | Measure-Object).Count
+        $RecordTypes = $GeneralDbData | Group-Object RecordType | Select-Object Name, Count
+        
+        $HtmlContent += @"
+                <div class="stat-box">
+                    <div>Total PCA Events</div>
+                    <div class="stat-value">$EventCount</div>
+                </div>
+"@
+    }
+
+    $HtmlContent += @"
+            </div>
+"@
+
+    $HtmlContent += @"
+            <div class="section">
+                <h2>PCA Application Execution Log</h2>
+"@
+
+    if ($AppLaunchData) {
+        $AppLaunchHtml = $AppLaunchData | Sort-Object LastExecutionTime -Descending | ConvertTo-Html -Fragment -Property ExecutablePath, LastExecutionTime
+        $AppLaunchHtml = $AppLaunchHtml -replace "<td>([^<]*)</td>", "<td class=`"path-column`">`$1</td>"
+        $HtmlContent += $AppLaunchHtml
+    } else {
+        $HtmlContent += "<p>No execution data found.</p>"
+    }
+
+    $HtmlContent += @"
+            </div>
+
+            <div class="section">
+                <h2>PCA Process Events & Abnormal Exits</h2>
+"@
+
+    if ($GeneralDbData) {
+        $GeneralDbHtml = $GeneralDbData | Sort-Object Timestamp -Descending | ConvertTo-Html -Fragment
+        $GeneralDbHtml = $GeneralDbHtml -replace "<td>([^<]*)</td>", "<td class=`"path-column`">`$1</td>"
+        $HtmlContent += $GeneralDbHtml
+    } else {
+        $HtmlContent += "<p>No process event data found.</p>"
+    }
+
+    $HtmlContent += @"
+            </div>
+
+            <div class="footer">
+                <p>Generated by PCA_Analyzer.ps1 - PowerShell Hunter Project</p>
+                <p>$(Get-Date -Format 'dddd, MMMM dd, yyyy HH:mm:ss')</p>
+            </div>
+        </div>
+"@
+
+    $HtmlContent += @"
+    </body>
+    </html>
+"@
+
+    $HtmlContent | Out-File -FilePath $HtmlPath -Encoding UTF8
+}
+
+Write-Host "Parsing PCA logs..." -ForegroundColor Yellow
+
+$AppLaunchData = Parse-PcaAppLaunchDic
+$GeneralDbData = Parse-PcaGeneralDb0
+
+Write-Host "`nPCA Application Execution Log (PcaAppLaunchDic.txt):" -ForegroundColor Cyan
+if ($AppLaunchData) {
+    $AppLaunchData | Sort-Object LastExecutionTime -Descending | Format-Table -AutoSize -Wrap
+} else {
+    Write-Host "No execution data found." -ForegroundColor Yellow
+}
+
+Write-Host "`nPCA Process Events & Abnormal Exits (PcaGeneralDb0.txt):" -ForegroundColor Cyan
+if ($GeneralDbData) {
+    $GeneralDbData | Sort-Object Timestamp -Descending | Format-Table -AutoSize -Wrap
+} else {
+    Write-Host "No process event data found." -ForegroundColor Yellow
+}
+
+$HtmlReportPath = Export-ResultsToFormats `
+    -AppLaunchData $AppLaunchData `
+    -GeneralDbData $GeneralDbData `
+    -ExportFormat $ExportFormat `
+    -BasePath "$env:USERPROFILE\Desktop\PCA_Analysis"
+
+if ($HtmlReportPath -and (Test-Path $HtmlReportPath)) {
+    Write-Host "`nOpening HTML report..." -ForegroundColor Cyan
+    Start-Process $HtmlReportPath
+}
+
+Write-Host "`nPCA Analysis complete!" -ForegroundColor Green
+
+}
+
+
 
 function Analyze-MRURegistry {
    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -113,81 +436,12 @@ param(
     [DateTime]$EndDate
 )
 
-<#
-.SYNOPSIS
-    Extracts and analyzes Windows ShellBag data from the registry.
-
-.DESCRIPTION
-    This script extracts and analyzes Windows ShellBag data from the registry
-    to identify folder access history, including evidence of deleted folder access.
-    It can generate detailed reports in HTML, CSV, and JSON formats.
-
-    Use PowerShell's standard -Verbose parameter to get detailed diagnostic information
-    about the script's execution, including which registry paths are being checked,
-    how many items are found, and other useful troubleshooting information.
-
-.PARAMETER OutputPath
-    The base path/filename to use for output files. Default is "ShellBagHunter".
-
-.PARAMETER ProcessAllUsers
-    If specified, attempts to analyze ShellBag data for all user profiles.
-
-.PARAMETER UserSID
-    If specified, only analyzes ShellBag data for the specified user SID. Default is current user.
-
-.PARAMETER IncludeDeleted
-    If specified, the script will attempt to identify and highlight evidence of deleted folder access.
-
-.PARAMETER OutputFormat
-    The format to export results. Accepts: HTML, CSV, JSON, or ALL. Default is ALL.
-
-.PARAMETER FilterPath
-    If specified, only includes ShellBag entries containing this path substring.
-
-.PARAMETER DaysBack
-    If specified, only shows ShellBag entries from the last N days. Default is 0 (show all).
-
-.PARAMETER StartDate
-    If specified, only shows ShellBag entries from this date onwards.
-
-.PARAMETER EndDate
-    If specified, only shows ShellBag entries until this date.
-
-.NOTES
-    File Name      : shellBagHunter.ps1
-    Prerequisite   : PowerShell 5.1 or later
-    Author         : The Haag
-    
-.EXAMPLE
-    .\shellBagHunter.ps1 -OutputFormat HTML
-    Analyzes ShellBag data and generates only an HTML report.
-
-.EXAMPLE
-    .\shellBagHunter.ps1 -IncludeDeleted -Verbose
-    Analyzes ShellBag data with detailed diagnostic output, including evidence of deleted folders.
-
-.EXAMPLE
-    .\shellBagHunter.ps1 -DaysBack 7
-    Shows only ShellBag entries from the last 7 days and generates all report formats.
-
-.EXAMPLE
-    .\shellBagHunter.ps1 -StartDate (Get-Date).AddDays(-30) -EndDate (Get-Date)
-    Shows only ShellBag entries from the last 30 days.
-
-.LINK
-    https://github.com/MHaggis/PowerShell-Hunter
-#>
 
 $AsciiArt = @"
     +-+-+-+-+-+-+-+-+-+ 
     |S|h|e|l|l|B|a|g|s| 
     +-+-+-+-+-+-+-+-+-+ 
-                                                                           
- +-+-+-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+
- |P|o|w|e|r|S|h|e|l|l| |H|U|N|T|E|R|
- +-+-+-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+
-
-        [ Hunt smarter, Hunt harder ]
+                                                                          
 "@
 
 Write-Host $AsciiArt -ForegroundColor Cyan
@@ -840,7 +1094,6 @@ function Create-HtmlReport {
     $HtmlContent += @"
             <div class="footer">
                 <p>Generated by ShellBag Hunter - PowerShell Hunter Toolkit</p>
-                <p>https://github.com/MHaggis/PowerShell-Hunter</p>
             </div>
         </div>
     </body>
@@ -1204,63 +1457,11 @@ param(
     [switch]$ReturnHtmlContent
 )
 
-<#
-.SYNOPSIS
-    Analyzes Windows Prefetch files to identify program execution history.
-
-.DESCRIPTION
-    This script extracts and analyzes Windows Prefetch files to identify application execution
-    history, frequency, and patterns. It can generate detailed reports in HTML, CSV, and JSON formats.
-
-.PARAMETER ExportFormat
-    The format to export results. Accepts: HTML, CSV, JSON, or ALL. Default is ALL.
-
-.PARAMETER PrefetchPath
-    The path to the Prefetch directory. Default is "C:\Windows\Prefetch".
-
-.PARAMETER SortByLastExecution
-    If specified, results will be sorted by last execution time instead of execution count.
-
-.PARAMETER ExecutedInLast24Hours
-    If specified, only shows programs executed in the last 24 hours.
-
-.PARAMETER TopExecuted
-    If specified, only shows the top N most executed programs. Default is 0 (show all).
-
-.PARAMETER ReturnHtmlContent
-    If specified, the function will return the HTML content instead of writing to file.
-
-.NOTES
-    File Name      : Prefetch_Hunter.ps1
-    Prerequisite   : PowerShell 5.1 or later, Administrator rights
-    Author         : The Haag
-    
-.EXAMPLE
-    .\Prefetch_Hunter.ps1 -ExportFormat HTML
-    Analyzes Prefetch data and generates only an HTML report.
-
-.EXAMPLE
-    .\Prefetch_Hunter.ps1 -TopExecuted 10 -SortByLastExecution
-    Shows the top 10 most recently executed programs and generates all report formats.
-
-.EXAMPLE
-    .\Prefetch_Hunter.ps1 -ExecutedInLast24Hours
-    Shows only programs executed in the last 24 hours and generates all report formats.
-
-.LINK
-    https://github.com/MHaggis/PowerShell-Hunter
-#>
-
 $AsciiArt = @"
     +-+-+-+-+-+-+-+-+ 
     |P|r|e|f|e|t|c|h| 
     +-+-+-+-+-+-+-+-+ 
                                                                            
- +-+-+-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+
- |P|o|w|e|r|S|h|e|l|l| |H|U|N|T|E|R|
- +-+-+-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+
-
-        [ Hunt smarter, Hunt harder ]
 "@
 
 Write-Host $AsciiArt -ForegroundColor Cyan
@@ -2020,9 +2221,7 @@ function Create-HtmlReport {
             </div>
             
             <div class="footer">
-                <p>Generated by Prefetch Hunter - PowerShell Hunter Toolkit</p>
                 <p>Enhanced with <a href="https://lolbas-project.github.io/" target="_blank">LOLBAS Project</a> integration</p>
-                <p>https://github.com/MHaggis/PowerShell-Hunter</p>
             </div>
         </div>
     </body>
@@ -2118,7 +2317,8 @@ function Show-Menu {
         Write-Host "1. run  Analyze-MRURegistry"
         Write-Host "2. run  ShellBagHunter"
         Write-Host "3. run  Prefetch  "
-		Write-Host "4. exit"
+		Write-Host "4. run pca "
+		Write-Host "5. exit"
         Write-Host "--------------------"
         $choice = Read-Host "choice"
         
@@ -2139,7 +2339,12 @@ function Show-Menu {
 				Prefetch
 				Pause
 			}
-            "4" { 
+			"4" {
+			Clear-Host
+				PCA
+				Pause
+			}
+            "5" { 
                 Write-Host "exit"
                 exit
 				
